@@ -159,6 +159,26 @@ class AuditLog(Base):
     entity_label = Column(String(255), nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow, index=True)
 
+class CompanySettings(Base):
+    __tablename__ = "company_settings"
+
+    # Singleton row (single tenant)
+    id = Column(String(50), primary_key=True, default="singleton")
+
+    company_name = Column(String(255), nullable=False, default="PT. Mixindo Abadi Karya")
+    address = Column(Text, nullable=True)
+    whatsapp = Column(String(50), nullable=True)
+    email = Column(String(255), nullable=True)
+    website = Column(String(255), nullable=True)
+
+    logo_content_type = Column(String(255), nullable=True)
+    logo_data = Column(BinaryBlob, nullable=True)
+
+    stamp_content_type = Column(String(255), nullable=True)
+    stamp_data = Column(BinaryBlob, nullable=True)
+
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
 
 Base.metadata.create_all(bind=engine)
 
@@ -199,6 +219,16 @@ def _log_audit(
             entity_label=(entity_label or None),
         )
     )
+
+def _get_company_settings(db: Session) -> CompanySettings:
+    row = db.query(CompanySettings).filter(CompanySettings.id == "singleton").first()
+    if row:
+        return row
+    row = CompanySettings(id="singleton")
+    db.add(row)
+    db.commit()
+    db.refresh(row)
+    return row
 
 # ================= APP =================
 app = FastAPI()
@@ -260,6 +290,14 @@ class UserUpdate(BaseModel):
     email_or_phone: Optional[str] = None
     status: Optional[str] = None
     role: Optional[str] = None
+
+
+class CompanySettingsUpdate(BaseModel):
+    company_name: str
+    address: Optional[str] = None
+    whatsapp: Optional[str] = None
+    email: Optional[str] = None
+    website: Optional[str] = None
 
 
 class TaskCreate(BaseModel):
@@ -735,12 +773,15 @@ def generate_report(project_id: str, db: Session = Depends(get_db)):
             mts = db.query(MaterialTest).filter(MaterialTest.id.in_(material_ids)).all()
             material_map = {m.id: m for m in mts}
 
+        settings = _get_company_settings(db)
+
         # ================= PDF =================
-        from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
+        from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, Image
         from reportlab.lib.styles import getSampleStyleSheet
         from reportlab.lib import colors
         from reportlab.lib.pagesizes import A4
         from reportlab.lib.units import cm
+        from reportlab.lib.utils import ImageReader
 
         buffer = BytesIO()
         doc = SimpleDocTemplate(
@@ -754,8 +795,56 @@ def generate_report(project_id: str, db: Session = Depends(get_db)):
         styles = getSampleStyleSheet()
         elements = []
 
-        # HEADER
-        elements.append(Paragraph("<b>LAPORAN PROYEK</b>", styles['Title']))
+        logo_flowable = None
+        if settings.logo_data:
+            try:
+                reader = ImageReader(BytesIO(settings.logo_data))
+                w, h = reader.getSize()
+                max_w = 4.5 * cm
+                max_h = 2.2 * cm
+                scale = min(max_w / float(w), max_h / float(h))
+                logo_flowable = Image(BytesIO(settings.logo_data), width=w * scale, height=h * scale)
+            except Exception:
+                logo_flowable = None
+
+        company_lines = []
+        company_name = (settings.company_name or "").strip() or "PT. Mixindo Abadi Karya"
+        company_lines.append(f"<b>{company_name}</b>")
+        if settings.address:
+            company_lines.append(settings.address)
+        contact_bits = []
+        if settings.whatsapp:
+            contact_bits.append(f"WA: {settings.whatsapp}")
+        if settings.email:
+            contact_bits.append(f"Email: {settings.email}")
+        if settings.website:
+            contact_bits.append(f"Web: {settings.website}")
+        if contact_bits:
+            company_lines.append(" • ".join(contact_bits))
+
+        header_table = Table(
+            [
+                [
+                    logo_flowable if logo_flowable else "",
+                    Paragraph("<br/>".join(company_lines), styles["Normal"]),
+                ]
+            ],
+            colWidths=[5.0 * cm, 12.0 * cm],
+        )
+        header_table.setStyle(
+            TableStyle(
+                [
+                    ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                    ("LEFTPADDING", (0, 0), (-1, -1), 0),
+                    ("RIGHTPADDING", (0, 0), (-1, -1), 0),
+                    ("TOPPADDING", (0, 0), (-1, -1), 0),
+                    ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
+                ]
+            )
+        )
+
+        elements.append(header_table)
+        elements.append(Paragraph("<b>LAPORAN PROYEK</b>", styles["Title"]))
         elements.append(Spacer(1, 10))
 
         elements.append(Paragraph(f"Nama: {project.name}", styles['Normal']))
@@ -819,7 +908,32 @@ def generate_report(project_id: str, db: Session = Depends(get_db)):
             )
             elements.append(table)
 
-        doc.build(elements)
+        stamp_reader = None
+        if settings.stamp_data:
+            try:
+                stamp_reader = ImageReader(BytesIO(settings.stamp_data))
+            except Exception:
+                stamp_reader = None
+
+        def _on_page(canvas, _doc):
+            if not stamp_reader:
+                return
+            try:
+                sw, sh = stamp_reader.getSize()
+                max_w = 4.0 * cm
+                max_h = 4.0 * cm
+                scale = min(max_w / float(sw), max_h / float(sh))
+                w = sw * scale
+                h = sh * scale
+                x = _doc.pagesize[0] - _doc.rightMargin - w
+                y = _doc.bottomMargin - 0.2 * cm
+                if y < 0.8 * cm:
+                    y = 0.8 * cm
+                canvas.drawImage(stamp_reader, x, y, width=w, height=h, mask="auto")
+            except Exception:
+                return
+
+        doc.build(elements, onFirstPage=_on_page, onLaterPages=_on_page)
 
         buffer.seek(0)
 
@@ -855,6 +969,121 @@ def list_audit_logs(scope: str = Query("all"), limit: int = Query(10, ge=1, le=1
         }
         for x in items
     ]
+
+
+# ================= COMPANY SETTINGS (SINGLE TENANT) =================
+def _serialize_company_settings(row: CompanySettings):
+    return {
+        "company_name": row.company_name,
+        "address": row.address,
+        "whatsapp": row.whatsapp,
+        "email": row.email,
+        "website": row.website,
+        "has_logo": bool(row.logo_data),
+        "has_stamp": bool(row.stamp_data),
+        "updated_at": row.updated_at.isoformat() if row.updated_at else None,
+    }
+
+
+@app.get("/api/v1/company-settings")
+def get_company_settings(db: Session = Depends(get_db)):
+    row = _get_company_settings(db)
+    return _serialize_company_settings(row)
+
+
+@app.put("/api/v1/company-settings")
+def update_company_settings(data: CompanySettingsUpdate, request: Request, db: Session = Depends(get_db)):
+    row = _get_company_settings(db)
+    row.company_name = (data.company_name or "").strip()[:255] or row.company_name
+    row.address = (data.address or "").strip() or None
+    row.whatsapp = (data.whatsapp or "").strip() or None
+    row.email = (data.email or "").strip() or None
+    row.website = (data.website or "").strip() or None
+    _log_audit(db, request, scope="document", action="update", entity_type="company_settings", entity_id=row.id, entity_label="company_profile")
+    db.commit()
+    return {"message": "Pengaturan perusahaan berhasil disimpan"}
+
+
+@app.get("/api/v1/company-settings/logo")
+def view_company_logo(download: bool = Query(False), db: Session = Depends(get_db)):
+    row = _get_company_settings(db)
+    if not row.logo_data:
+        raise HTTPException(status_code=404, detail="Logo belum diupload")
+    media_type = (row.logo_content_type or "").strip() or "application/octet-stream"
+    disposition = "attachment" if download else "inline"
+    headers = {"Content-Disposition": f'{disposition}; filename="company_logo"'}
+    return Response(content=row.logo_data, media_type=media_type, headers=headers)
+
+
+@app.post("/api/v1/company-settings/logo")
+async def upload_company_logo(
+    request: Request,
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+):
+    row = _get_company_settings(db)
+    raw = await file.read()
+    if raw is None:
+        raw = b""
+    content_type = (file.content_type or "").strip()[:255] or None
+    if content_type and not content_type.startswith("image/"):
+        raise HTTPException(status_code=400, detail="File harus berupa gambar")
+    row.logo_content_type = content_type
+    row.logo_data = raw
+    _log_audit(db, request, scope="document", action="update", entity_type="company_settings", entity_id=row.id, entity_label="company_logo")
+    db.commit()
+    return {"message": "Logo berhasil diupload"}
+
+
+@app.delete("/api/v1/company-settings/logo")
+def delete_company_logo(request: Request, db: Session = Depends(get_db)):
+    row = _get_company_settings(db)
+    row.logo_content_type = None
+    row.logo_data = None
+    _log_audit(db, request, scope="document", action="delete", entity_type="company_settings", entity_id=row.id, entity_label="company_logo")
+    db.commit()
+    return {"message": "Logo berhasil dihapus"}
+
+
+@app.get("/api/v1/company-settings/stamp")
+def view_company_stamp(download: bool = Query(False), db: Session = Depends(get_db)):
+    row = _get_company_settings(db)
+    if not row.stamp_data:
+        raise HTTPException(status_code=404, detail="Cap belum diupload")
+    media_type = (row.stamp_content_type or "").strip() or "application/octet-stream"
+    disposition = "attachment" if download else "inline"
+    headers = {"Content-Disposition": f'{disposition}; filename="company_stamp"'}
+    return Response(content=row.stamp_data, media_type=media_type, headers=headers)
+
+
+@app.post("/api/v1/company-settings/stamp")
+async def upload_company_stamp(
+    request: Request,
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+):
+    row = _get_company_settings(db)
+    raw = await file.read()
+    if raw is None:
+        raw = b""
+    content_type = (file.content_type or "").strip()[:255] or None
+    if content_type and not content_type.startswith("image/"):
+        raise HTTPException(status_code=400, detail="File harus berupa gambar")
+    row.stamp_content_type = content_type
+    row.stamp_data = raw
+    _log_audit(db, request, scope="document", action="update", entity_type="company_settings", entity_id=row.id, entity_label="company_stamp")
+    db.commit()
+    return {"message": "Cap berhasil diupload"}
+
+
+@app.delete("/api/v1/company-settings/stamp")
+def delete_company_stamp(request: Request, db: Session = Depends(get_db)):
+    row = _get_company_settings(db)
+    row.stamp_content_type = None
+    row.stamp_data = None
+    _log_audit(db, request, scope="document", action="delete", entity_type="company_settings", entity_id=row.id, entity_label="company_stamp")
+    db.commit()
+    return {"message": "Cap berhasil dihapus"}
 
 
 @app.get("/api/v1/dashboard")
@@ -1005,6 +1234,9 @@ def list_users(db: Session = Depends(get_db)):
 
 @app.post("/api/v1/users")
 def create_user(data: UserCreate, db: Session = Depends(get_db)):
+    if db.query(User).count() >= 2:
+        raise HTTPException(status_code=409, detail="Maksimal 2 user saja")
+
     username = (data.username or "").strip()
     if not username:
         raise HTTPException(status_code=400, detail="Username wajib diisi")
