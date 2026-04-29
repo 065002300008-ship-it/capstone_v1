@@ -2,16 +2,11 @@
 
 import React, { useEffect, useState } from 'react';
 import { apiFetch, apiUrl } from '@/lib/api';
+import { useRouter } from 'next/navigation';
 
 export default function PengaturanPage() {
-  const [actor, setActor] = useState(() => {
-    try {
-      return (window.localStorage.getItem('mixindo_actor_username') ?? '').trim();
-    } catch {
-      return '';
-    }
-  });
-  const [savedMsg, setSavedMsg] = useState('');
+  const router = useRouter();
+  const [activeTab, setActiveTab] = useState<'perusahaan' | 'notifikasi' | 'keamanan'>('perusahaan');
   const [busy, setBusy] = useState(false);
 
   const [company, setCompany] = useState({
@@ -26,6 +21,18 @@ export default function PengaturanPage() {
   });
   const [companyMsg, setCompanyMsg] = useState('');
   const [assetVersion, setAssetVersion] = useState(0);
+
+  const [notif, setNotif] = useState({
+    email_enabled: false,
+    phone_enabled: false,
+    updated_at: null as string | null,
+  });
+  const [notifMsg, setNotifMsg] = useState('');
+
+  const [authEmail, setAuthEmail] = useState('');
+  const [oldPw, setOldPw] = useState('');
+  const [newPw, setNewPw] = useState('');
+  const [secMsg, setSecMsg] = useState('');
 
   const refreshCompany = async () => {
     setBusy(true);
@@ -47,20 +54,30 @@ export default function PengaturanPage() {
     }
   };
 
+  const refreshNotif = async () => {
+    setBusy(true);
+    try {
+      const res = await apiFetch('/api/v1/notification-settings');
+      const data = await res.json().catch(() => ({}));
+      setNotif({
+        email_enabled: Boolean(data.email_enabled),
+        phone_enabled: Boolean(data.phone_enabled),
+        updated_at: data.updated_at || null,
+      });
+    } finally {
+      setBusy(false);
+    }
+  };
+
   useEffect(() => {
     refreshCompany();
-  }, []);
-
-  const saveActor = () => {
-    const v = actor.trim();
+    refreshNotif();
     try {
-      window.localStorage.setItem('mixindo_actor_username', v);
+      setAuthEmail((window.localStorage.getItem('mixindo_auth_email') ?? '').trim());
     } catch {
-      // ignore
+      setAuthEmail('');
     }
-    setSavedMsg(v ? `User aktif diset: ${v}` : 'User aktif dikosongkan');
-    setTimeout(() => setSavedMsg(''), 2500);
-  };
+  }, []);
 
   const saveCompany = async () => {
     const payload = {
@@ -89,6 +106,73 @@ export default function PengaturanPage() {
       setBusy(false);
       setTimeout(() => setCompanyMsg(''), 2500);
     }
+  };
+
+  const saveNotif = async () => {
+    setBusy(true);
+    setNotifMsg('');
+    try {
+      const res = await apiFetch('/api/v1/notification-settings', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email_enabled: notif.email_enabled, phone_enabled: notif.phone_enabled }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        setNotifMsg(data.detail || 'Gagal menyimpan.');
+        return;
+      }
+      setNotifMsg('Perubahan tersimpan.');
+      refreshNotif();
+    } finally {
+      setBusy(false);
+      setTimeout(() => setNotifMsg(''), 2500);
+    }
+  };
+
+  const changePassword = async () => {
+    const email = authEmail.trim();
+    if (!email) {
+      setSecMsg('Email login tidak ditemukan. Silakan login ulang.');
+      setTimeout(() => setSecMsg(''), 2500);
+      return;
+    }
+    if (!oldPw.trim() || !newPw.trim()) {
+      setSecMsg('Password lama & baru wajib diisi.');
+      setTimeout(() => setSecMsg(''), 2500);
+      return;
+    }
+
+    setBusy(true);
+    setSecMsg('');
+    try {
+      const res = await apiFetch('/api/v1/auth/change-password', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email, old_password: oldPw, new_password: newPw }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        setSecMsg(data.detail || 'Gagal mengubah password.');
+        return;
+      }
+      setOldPw('');
+      setNewPw('');
+      setSecMsg('Password berhasil diubah.');
+    } finally {
+      setBusy(false);
+      setTimeout(() => setSecMsg(''), 2500);
+    }
+  };
+
+  const logout = () => {
+    try {
+      window.localStorage.removeItem('mixindo_auth_email');
+      window.localStorage.removeItem('mixindo_actor_username');
+    } catch {
+      // ignore
+    }
+    router.replace('/login');
   };
 
   const uploadAsset = async (kind: 'logo' | 'stamp', file: File) => {
@@ -129,53 +213,49 @@ export default function PengaturanPage() {
         <p className="text-sm text-gray-500 mt-1">Kelola konfigurasi dan preferensi sistem</p>
       </div>
 
-      <div className="bg-white rounded-xl border border-gray-100 shadow-sm p-6">
-        <h2 className="text-lg font-bold text-gray-800">User Aktif (Sementara)</h2>
-        <p className="text-sm text-gray-500 mt-1">
-          Untuk tracking action di modul Laporan/Dokumen tanpa login, isi username yang sedang digunakan.
-        </p>
-        <div className="flex flex-col md:flex-row gap-3 mt-4">
-          <input
-            value={actor}
-            onChange={(e) => setActor(e.target.value)}
-            placeholder="Username (contoh: admin01)"
-            className="flex-1 px-4 py-2 border border-gray-200 rounded-lg bg-white text-gray-900 focus:ring-2 focus:ring-blue-500 focus:outline-none"
-          />
-          <button
-            type="button"
-            onClick={saveActor}
-            className="px-5 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 font-medium"
-          >
-            Simpan
-          </button>
-        </div>
-        {savedMsg ? <div className="text-xs text-green-700 mt-2">{savedMsg}</div> : null}
-      </div>
-
       <div className="bg-white rounded-xl border border-gray-100 shadow-sm flex flex-col md:flex-row overflow-hidden min-h-[500px]">
         
         {/* Sidebar Mini untuk Menu Pengaturan */}
         <div className="w-full md:w-64 bg-gray-50 border-r border-gray-100 p-4">
           <ul className="space-y-1">
             <li>
-              <button className="w-full text-left px-4 py-2 bg-blue-50 text-blue-700 font-medium rounded-lg">
+              <button
+                type="button"
+                onClick={() => setActiveTab('perusahaan')}
+                className={`w-full text-left px-4 py-2 font-medium rounded-lg ${activeTab === 'perusahaan' ? 'bg-blue-50 text-blue-700' : 'text-gray-600 hover:bg-gray-100'}`}
+              >
                 Perusahaan
               </button>
             </li>
-            <li><button className="w-full text-left px-4 py-2 text-gray-600 hover:bg-gray-100 rounded-lg">Notifikasi</button></li>
-            <li><button className="w-full text-left px-4 py-2 text-gray-600 hover:bg-gray-100 rounded-lg">Keamanan</button></li>
-            <li><button className="w-full text-left px-4 py-2 text-gray-600 hover:bg-gray-100 rounded-lg">Database</button></li>
-            <li><button className="w-full text-left px-4 py-2 text-gray-600 hover:bg-gray-100 rounded-lg">Email</button></li>
-            <li><button className="w-full text-left px-4 py-2 text-gray-600 hover:bg-gray-100 rounded-lg">Tampilan</button></li>
+            <li>
+              <button
+                type="button"
+                onClick={() => setActiveTab('notifikasi')}
+                className={`w-full text-left px-4 py-2 font-medium rounded-lg ${activeTab === 'notifikasi' ? 'bg-blue-50 text-blue-700' : 'text-gray-600 hover:bg-gray-100'}`}
+              >
+                Notifikasi
+              </button>
+            </li>
+            <li>
+              <button
+                type="button"
+                onClick={() => setActiveTab('keamanan')}
+                className={`w-full text-left px-4 py-2 font-medium rounded-lg ${activeTab === 'keamanan' ? 'bg-blue-50 text-blue-700' : 'text-gray-600 hover:bg-gray-100'}`}
+              >
+                Keamanan
+              </button>
+            </li>
           </ul>
         </div>
 
         {/* Area Konten Utama: Form Informasi Perusahaan */}
         <div className="flex-1 p-8">
-          <h2 className="text-lg font-bold text-gray-800">Informasi Perusahaan</h2>
-          <p className="text-sm text-gray-500 mb-6">Kelola informasi dasar perusahaan</p>
+          {activeTab === 'perusahaan' ? (
+            <>
+              <h2 className="text-lg font-bold text-gray-800">Informasi Perusahaan</h2>
+              <p className="text-sm text-gray-500 mb-6">Kelola informasi dasar perusahaan</p>
 
-          <div className="max-w-3xl space-y-6">
+              <div className="max-w-3xl space-y-6">
             <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-1">Nama Perusahaan</label>
@@ -330,7 +410,126 @@ export default function PengaturanPage() {
               {companyMsg ? <div className="text-xs text-green-700">{companyMsg}</div> : null}
               {company.updated_at ? <div className="ml-auto text-xs text-gray-400">Update: {new Date(company.updated_at).toLocaleString()}</div> : null}
             </div>
-          </div>
+              </div>
+            </>
+          ) : null}
+
+          {activeTab === 'notifikasi' ? (
+            <div className="max-w-3xl space-y-5">
+              <div>
+                <h2 className="text-lg font-bold text-gray-800">Notifikasi</h2>
+                <p className="text-sm text-gray-500 mt-1">
+                  Kirim notifikasi jika proyek 100% selesai, ada aktivitas CRUD pada laporan, atau ada aktivitas CRUD pada dokumen.
+                </p>
+              </div>
+
+              <div className="space-y-3">
+                <label className="flex items-center justify-between gap-4 border rounded-xl p-4 hover:bg-gray-50">
+                  <div>
+                    <div className="font-semibold text-gray-800 text-sm">Notifikasi Email</div>
+                    <div className="text-xs text-gray-500">Aktif/nonaktifkan notifikasi via email.</div>
+                  </div>
+                  <input
+                    type="checkbox"
+                    checked={notif.email_enabled}
+                    onChange={(e) => setNotif({ ...notif, email_enabled: e.target.checked })}
+                    className="h-5 w-5"
+                  />
+                </label>
+
+                <label className="flex items-center justify-between gap-4 border rounded-xl p-4 hover:bg-gray-50">
+                  <div>
+                    <div className="font-semibold text-gray-800 text-sm">Notifikasi No HP</div>
+                    <div className="text-xs text-gray-500">Aktif/nonaktifkan notifikasi via no HP.</div>
+                  </div>
+                  <input
+                    type="checkbox"
+                    checked={notif.phone_enabled}
+                    onChange={(e) => setNotif({ ...notif, phone_enabled: e.target.checked })}
+                    className="h-5 w-5"
+                  />
+                </label>
+              </div>
+
+              <div className="flex items-center gap-3 pt-4 border-t border-gray-100">
+                <button
+                  type="button"
+                  onClick={refreshNotif}
+                  className="px-6 py-2 border border-gray-200 text-gray-600 rounded-lg hover:bg-gray-50 font-medium transition-colors"
+                  disabled={busy}
+                >
+                  Refresh
+                </button>
+                <button
+                  type="button"
+                  onClick={saveNotif}
+                  className="px-6 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 font-medium transition-colors disabled:bg-blue-300"
+                  disabled={busy}
+                >
+                  Simpan
+                </button>
+                {notifMsg ? <div className="text-xs text-green-700">{notifMsg}</div> : null}
+                {notif.updated_at ? <div className="ml-auto text-xs text-gray-400">Update: {new Date(notif.updated_at).toLocaleString()}</div> : null}
+              </div>
+            </div>
+          ) : null}
+
+          {activeTab === 'keamanan' ? (
+            <div className="max-w-3xl space-y-5">
+              <div>
+                <h2 className="text-lg font-bold text-gray-800">Keamanan</h2>
+                <p className="text-sm text-gray-500 mt-1">Kelola password akun dan sesi login.</p>
+              </div>
+
+              <div className="border rounded-xl p-4 bg-gray-50">
+                <div className="text-sm text-gray-700">
+                  Email login: <span className="font-semibold">{authEmail || '-'}</span>
+                </div>
+                <button
+                  type="button"
+                  onClick={logout}
+                  className="mt-3 px-4 py-2 border border-gray-200 rounded-lg hover:bg-white text-sm font-medium"
+                >
+                  Logout
+                </button>
+              </div>
+
+              <div className="border rounded-xl p-4">
+                <div className="font-semibold text-gray-800 text-sm">Ubah Password</div>
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mt-3">
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">Password Lama</label>
+                    <input
+                      type="password"
+                      value={oldPw}
+                      onChange={(e) => setOldPw(e.target.value)}
+                      className="w-full px-4 py-2 border border-gray-200 rounded-lg bg-white text-gray-900 focus:ring-2 focus:ring-blue-500 focus:outline-none"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">Password Baru</label>
+                    <input
+                      type="password"
+                      value={newPw}
+                      onChange={(e) => setNewPw(e.target.value)}
+                      className="w-full px-4 py-2 border border-gray-200 rounded-lg bg-white text-gray-900 focus:ring-2 focus:ring-blue-500 focus:outline-none"
+                    />
+                  </div>
+                </div>
+                <div className="flex items-center gap-3 mt-4">
+                  <button
+                    type="button"
+                    onClick={changePassword}
+                    className="px-6 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 font-medium transition-colors disabled:bg-blue-300"
+                    disabled={busy}
+                  >
+                    Simpan
+                  </button>
+                  {secMsg ? <div className="text-xs text-green-700">{secMsg}</div> : null}
+                </div>
+              </div>
+            </div>
+          ) : null}
         </div>
         
       </div>

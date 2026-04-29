@@ -16,6 +16,8 @@ import random
 import string
 import traceback
 import os
+import hashlib
+import secrets
 
 # ================= DATABASE =================
 DATABASE_URL = os.getenv("DATABASE_URL", "mysql+pymysql://root:@127.0.0.1:3306/mixindo_db")
@@ -146,6 +148,35 @@ class User(Base):
     last_seen_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
 
+class AuthAccount(Base):
+    __tablename__ = "auth_accounts"
+
+    id = Column(String(100), primary_key=True, default=lambda: str(uuid.uuid4()))
+    email = Column(String(255), unique=True, index=True, nullable=False)
+    password_salt = Column(String(64), nullable=False)
+    password_hash = Column(String(128), nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+class NotificationSettings(Base):
+    __tablename__ = "notification_settings"
+
+    # Singleton row (single tenant)
+    id = Column(String(50), primary_key=True, default="singleton")
+    email_enabled = Column(Integer, default=0)  # 0/1 (MySQL friendly)
+    phone_enabled = Column(Integer, default=0)  # 0/1 (MySQL friendly)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class Notification(Base):
+    __tablename__ = "notifications"
+
+    id = Column(String(100), primary_key=True, default=lambda: str(uuid.uuid4()))
+    channel = Column(String(20), nullable=False)  # email|phone
+    category = Column(String(30), nullable=False)  # project|report|document
+    title = Column(String(255), nullable=False)
+    body = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, index=True)
+
 
 class AuditLog(Base):
     __tablename__ = "audit_logs"
@@ -226,9 +257,36 @@ def _get_company_settings(db: Session) -> CompanySettings:
         return row
     row = CompanySettings(id="singleton")
     db.add(row)
-    db.commit()
-    db.refresh(row)
-    return row
+
+# ================= AUTH HELPERS =================
+def _hash_password(password: str, salt_hex: str) -> str:
+    dk = hashlib.pbkdf2_hmac(
+        "sha256",
+        (password or "").encode("utf-8"),
+        bytes.fromhex(salt_hex),
+        120_000,
+    )
+    return dk.hex()
+
+
+def _verify_password(password: str, salt_hex: str, expected_hash_hex: str) -> bool:
+    got = _hash_password(password, salt_hex)
+    return secrets.compare_digest(got, expected_hash_hex or "")
+
+
+def _notify(db: Session, *, category: str, title: str, body: Optional[str] = None) -> None:
+    settings = db.query(NotificationSettings).filter(NotificationSettings.id == "singleton").first()
+    if not settings:
+        settings = NotificationSettings(id="singleton", email_enabled=0, phone_enabled=0)
+        db.add(settings)
+        db.flush()
+
+    if int(settings.email_enabled or 0) == 1:
+        db.add(Notification(channel="email", category=category, title=title[:255], body=body))
+    if int(settings.phone_enabled or 0) == 1:
+        db.add(Notification(channel="phone", category=category, title=title[:255], body=body))
+    # Commit is handled by the caller so notifications are stored atomically.
+    return None
 
 # ================= APP =================
 app = FastAPI()
@@ -300,6 +358,27 @@ class CompanySettingsUpdate(BaseModel):
     website: Optional[str] = None
 
 
+class AuthRegister(BaseModel):
+    email: str
+    password: str
+
+
+class AuthLogin(BaseModel):
+    email: str
+    password: str
+
+
+class AuthChangePassword(BaseModel):
+    email: str
+    old_password: str
+    new_password: str
+
+
+class NotificationSettingsUpdate(BaseModel):
+    email_enabled: bool
+    phone_enabled: bool
+
+
 class TaskCreate(BaseModel):
     project_id: str
     # Optional: selected from master "MaterialTest"
@@ -337,6 +416,116 @@ def _task_label(task: Task, material_map: dict) -> str:
     if task.material_test_id and task.material_test_id in material_map:
         return material_map[task.material_test_id].test_name
     return task.title or "-"
+
+# ================= AUTH + NOTIFICATION SETTINGS =================
+@app.post("/api/v1/auth/register")
+def auth_register(payload: AuthRegister, db: Session = Depends(get_db)):
+    email = (payload.email or "").strip().lower()
+    password = payload.password or ""
+    if not email:
+        raise HTTPException(status_code=422, detail="Email wajib diisi")
+    if not password.strip():
+        raise HTTPException(status_code=422, detail="Password wajib diisi")
+
+    existing = db.query(AuthAccount).filter(AuthAccount.email == email).first()
+    if existing:
+        raise HTTPException(status_code=409, detail="Email sudah terdaftar")
+
+    salt = secrets.token_hex(16)
+    row = AuthAccount(email=email, password_salt=salt, password_hash=_hash_password(password, salt))
+    db.add(row)
+    db.commit()
+    db.refresh(row)
+
+    actor_username = (email.split("@")[0] or email)[:80]
+    return {"message": "Registrasi berhasil", "actor_username": actor_username}
+
+
+@app.post("/api/v1/auth/login")
+def auth_login(payload: AuthLogin, db: Session = Depends(get_db)):
+    email = (payload.email or "").strip().lower()
+    password = payload.password or ""
+    if not email:
+        raise HTTPException(status_code=422, detail="Email wajib diisi")
+    if not password.strip():
+        raise HTTPException(status_code=422, detail="Password wajib diisi")
+
+    acc = db.query(AuthAccount).filter(AuthAccount.email == email).first()
+    if not acc:
+        raise HTTPException(status_code=401, detail="Email atau password salah")
+    if not _verify_password(password, acc.password_salt, acc.password_hash):
+        raise HTTPException(status_code=401, detail="Email atau password salah")
+
+    actor_username = (email.split("@")[0] or email)[:80]
+    return {"message": "Login berhasil", "actor_username": actor_username}
+
+
+@app.post("/api/v1/auth/change-password")
+def auth_change_password(payload: AuthChangePassword, db: Session = Depends(get_db)):
+    email = (payload.email or "").strip().lower()
+    if not email:
+        raise HTTPException(status_code=422, detail="Email wajib diisi")
+    acc = db.query(AuthAccount).filter(AuthAccount.email == email).first()
+    if not acc:
+        raise HTTPException(status_code=404, detail="Akun tidak ditemukan")
+
+    if not _verify_password(payload.old_password or "", acc.password_salt, acc.password_hash):
+        raise HTTPException(status_code=401, detail="Password lama salah")
+
+    new_pw = payload.new_password or ""
+    if not new_pw.strip():
+        raise HTTPException(status_code=422, detail="Password baru wajib diisi")
+
+    salt = secrets.token_hex(16)
+    acc.password_salt = salt
+    acc.password_hash = _hash_password(new_pw, salt)
+    db.commit()
+    return {"message": "Password berhasil diubah"}
+
+
+@app.get("/api/v1/notification-settings")
+def get_notification_settings(db: Session = Depends(get_db)):
+    row = db.query(NotificationSettings).filter(NotificationSettings.id == "singleton").first()
+    if not row:
+        row = NotificationSettings(id="singleton", email_enabled=0, phone_enabled=0)
+        db.add(row)
+        db.commit()
+        db.refresh(row)
+    return {
+        "email_enabled": bool(int(row.email_enabled or 0)),
+        "phone_enabled": bool(int(row.phone_enabled or 0)),
+        "updated_at": row.updated_at.isoformat() if row.updated_at else None,
+    }
+
+
+@app.put("/api/v1/notification-settings")
+def update_notification_settings(payload: NotificationSettingsUpdate, db: Session = Depends(get_db)):
+    row = db.query(NotificationSettings).filter(NotificationSettings.id == "singleton").first()
+    if not row:
+        row = NotificationSettings(id="singleton", email_enabled=0, phone_enabled=0)
+        db.add(row)
+        db.flush()
+
+    row.email_enabled = 1 if payload.email_enabled else 0
+    row.phone_enabled = 1 if payload.phone_enabled else 0
+    db.commit()
+    return {"message": "Pengaturan notifikasi tersimpan"}
+
+
+@app.get("/api/v1/notifications")
+def list_notifications(limit: int = Query(50, ge=1, le=200), db: Session = Depends(get_db)):
+    items = db.query(Notification).order_by(Notification.created_at.desc()).limit(limit).all()
+    return [
+        {
+            "id": x.id,
+            "channel": x.channel,
+            "category": x.category,
+            "title": x.title,
+            "body": x.body,
+            "created_at": x.created_at.isoformat() if x.created_at else None,
+        }
+        for x in items
+    ]
 
 # ================= SERIALIZER =================
 def serialize_project(project: Project):
@@ -381,6 +570,7 @@ def update_project_progress(project_id: str, db: Session):
         return
 
     tasks = db.query(Task).filter(Task.project_id == project.id).all()
+    prev_progress = int(project.progress or 0)
 
     # ===== HITUNG PROGRESS =====
     if len(tasks) == 0:
@@ -397,6 +587,12 @@ def update_project_progress(project_id: str, db: Session):
             project.status = "Completed"
         else:
             project.status = "In Progress"
+
+    # ===== NOTIFIKASI (PROYEK 100%) =====
+    if prev_progress < 100 and int(project.progress or 0) >= 100:
+        title = "Proyek selesai 100%"
+        body = f"Proyek {project.project_code or project.id} - {project.name or '-'} telah selesai."
+        _notify(db, category="project", title=title, body=body)
 
     db.commit()
 
@@ -1358,6 +1554,7 @@ def create_report_folder(data: ReportFolderCreate, request: Request, db: Session
     db.add(folder)
     db.flush()
     _log_audit(db, request, scope="report", action="create", entity_type="report_folder", entity_id=folder.id, entity_label=folder.name)
+    _notify(db, category="report", title="Aktivitas Laporan (CRUD)", body=f"Create folder laporan: {folder.name}")
     db.commit()
     db.refresh(folder)
     return serialize_report_folder(folder)
@@ -1374,6 +1571,7 @@ def update_report_folder(folder_id: str, data: ReportFolderUpdate, request: Requ
 
     folder.name = name
     _log_audit(db, request, scope="report", action="update", entity_type="report_folder", entity_id=folder.id, entity_label=folder.name)
+    _notify(db, category="report", title="Aktivitas Laporan (CRUD)", body=f"Update folder laporan: {folder.name}")
     db.commit()
     return {"message": "Folder berhasil diupdate"}
 
@@ -1385,6 +1583,7 @@ def delete_report_folder(folder_id: str, request: Request, db: Session = Depends
         raise HTTPException(status_code=404, detail="Folder tidak ditemukan")
 
     _log_audit(db, request, scope="report", action="delete", entity_type="report_folder", entity_id=folder.id, entity_label=folder.name)
+    _notify(db, category="report", title="Aktivitas Laporan (CRUD)", body=f"Delete folder laporan: {folder.name}")
     # Delete files first for DBs that don't enforce cascade reliably.
     db.query(ReportFile).filter(ReportFile.folder_id == folder_id).delete(synchronize_session=False)
     db.delete(folder)
@@ -1415,6 +1614,7 @@ def delete_report_file(file_id: str, request: Request, db: Session = Depends(get
         raise HTTPException(status_code=404, detail="File tidak ditemukan")
 
     _log_audit(db, request, scope="report", action="delete", entity_type="report_file", entity_id=f.id, entity_label=f.filename)
+    _notify(db, category="report", title="Aktivitas Laporan (CRUD)", body=f"Delete file laporan: {f.filename}")
     db.delete(f)
     db.commit()
     return {"message": "File berhasil dihapus"}
@@ -1431,6 +1631,7 @@ def rename_report_file(file_id: str, data: RenameFile, request: Request, db: Ses
 
     f.filename = filename[:255]
     _log_audit(db, request, scope="report", action="update", entity_type="report_file", entity_id=f.id, entity_label=f.filename)
+    _notify(db, category="report", title="Aktivitas Laporan (CRUD)", body=f"Rename file laporan: {f.filename}")
     db.commit()
     return {"message": "File berhasil diupdate"}
 
@@ -1487,6 +1688,7 @@ async def upload_report_file(
     db.add(row)
     db.flush()
     _log_audit(db, request, scope="report", action="create", entity_type="report_file", entity_id=row.id, entity_label=row.filename)
+    _notify(db, category="report", title="Aktivitas Laporan (CRUD)", body=f"Upload file laporan: {row.filename}")
     db.commit()
     db.refresh(row)
     return serialize_report_file(row)
@@ -1528,6 +1730,7 @@ async def upload_document_file(
     db.add(row)
     db.flush()
     _log_audit(db, request, scope="document", action="create", entity_type="document_file", entity_id=row.id, entity_label=row.filename)
+    _notify(db, category="document", title="Aktivitas Dokumen (CRUD)", body=f"Upload dokumen: {row.filename}")
     db.commit()
     db.refresh(row)
     return serialize_document_file(row)
@@ -1544,6 +1747,7 @@ def rename_document_file(file_id: str, data: RenameFile, request: Request, db: S
 
     f.filename = filename[:255]
     _log_audit(db, request, scope="document", action="update", entity_type="document_file", entity_id=f.id, entity_label=f.filename)
+    _notify(db, category="document", title="Aktivitas Dokumen (CRUD)", body=f"Rename dokumen: {f.filename}")
     db.commit()
     return {"message": "File berhasil diupdate"}
 
@@ -1555,6 +1759,7 @@ def delete_document_file(file_id: str, request: Request, db: Session = Depends(g
         raise HTTPException(status_code=404, detail="File tidak ditemukan")
 
     _log_audit(db, request, scope="document", action="delete", entity_type="document_file", entity_id=f.id, entity_label=f.filename)
+    _notify(db, category="document", title="Aktivitas Dokumen (CRUD)", body=f"Delete dokumen: {f.filename}")
     db.delete(f)
     db.commit()
     return {"message": "File berhasil dihapus"}
