@@ -1785,3 +1785,7 @@ def view_document_file(file_id: str, download: bool = Query(False), db: Session 
     disposition = "attachment" if download else "inline"
     headers = {"Content-Disposition": f'{disposition}; filename="{filename}"'}
     return Response(content=f.data, media_type=media_type, headers=headers)
+
+@app.get("/test-db")
+def test_db():
+    return {"db": "connected"}
