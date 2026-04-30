@@ -1,4 +1,4 @@
-from sqlalchemy import Column, String, Integer, Date, DateTime, Text
+from sqlalchemy import Column, String, Integer, Date, DateTime, String
 from sqlalchemy.ext.declarative import declarative_base
 from datetime import datetime
 
@@ -31,7 +31,7 @@ class Task(Base):
     id = Column(String(100), primary_key=True, index=True)
     project_id = Column(String(100))
     name = Column(String(255))
-    description = Column(Text)
+    description = Column(String)
 
     status = Column(String(100), default="To Do")
     progress = Column(Integer, default=0)

@@ -11,6 +11,9 @@ from pydantic import BaseModel
 from fastapi.responses import StreamingResponse, Response
 from io import BytesIO
 from typing import Optional, List
+from database import engine
+from models import Base
+Base.metadata.create_all(bind=engine)
 import uuid
 import random
 import string
