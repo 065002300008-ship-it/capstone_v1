@@ -1,4 +1,4 @@
-from sqlalchemy import Column, String, Integer, Date, DateTime, String
+from sqlalchemy import Column, String, Integer, Date, DateTime
 from sqlalchemy.ext.declarative import declarative_base
 from datetime import datetime
 
@@ -10,7 +10,7 @@ class Project(Base):
 
     id = Column(String(100), primary_key=True, index=True)
     name = Column(String(255))
-    description = Column(Text)
+    description = Column(String)
     client_name = Column(String(255))
 
     start_date = Column(Date)
