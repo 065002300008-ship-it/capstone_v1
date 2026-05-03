@@ -1201,12 +1201,21 @@ def _serialize_company_settings(row: CompanySettings):
 @app.get("/api/v1/company-settings")
 def get_company_settings(db: Session = Depends(get_db)):
     row = _get_company_settings(db)
+    if row is None:  # extra guard (shouldn't happen)
+        row = CompanySettings(id="singleton")
+        db.add(row)
+        db.commit()
+        db.refresh(row)
     return _serialize_company_settings(row)
 
 
 @app.put("/api/v1/company-settings")
 def update_company_settings(data: CompanySettingsUpdate, request: Request, db: Session = Depends(get_db)):
     row = _get_company_settings(db)
+    if row is None:  # extra guard (shouldn't happen)
+        row = CompanySettings(id="singleton")
+        db.add(row)
+        db.flush()
     row.company_name = (data.company_name or "").strip()[:255] or row.company_name
     row.address = (data.address or "").strip() or None
     row.whatsapp = (data.whatsapp or "").strip() or None
