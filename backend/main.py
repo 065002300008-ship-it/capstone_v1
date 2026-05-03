@@ -47,7 +47,7 @@ class MaterialTest(Base):
     material_name = Column(String(255), nullable=False, index=True)
     # Match the test numbering style within a material: 1, 2, 3, ...
     test_no = Column(Integer, nullable=True)
-    test_name = Column(Text, nullable=False)
+    test_name = Column(String(500), nullable=False)
 
     created_at = Column(DateTime, default=datetime.utcnow)
 
@@ -59,7 +59,7 @@ class Project(Base):
     project_code = Column(String(4), unique=True, index=True)
 
     name = Column(String(255))
-    description = Column(Text)
+    description = Column(String(1000), nullable=True)
     client_name = Column(String(255))
     start_date = Column(Date)
     deadline = Column(Date)
@@ -91,7 +91,7 @@ class Task(Base):
     )
 
     title = Column(String(255))
-    description = Column(Text, nullable=True)   # ✅ BARU
+    description = Column(String(1000), nullable=True)   # ✅ BARU
     progress = Column(Integer, default=0)       # ✅ BARU
     deadline = Column(Date, nullable=True)      # ✅ BARU
 
@@ -169,7 +169,7 @@ class Notification(Base):
     channel = Column(String(20), nullable=False)  # email|phone
     category = Column(String(30), nullable=False)  # project|report|document
     title = Column(String(255), nullable=False)
-    body = Column(Text, nullable=True)
+    body = Column(String(1000), nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow, index=True)
 
 
@@ -192,7 +192,7 @@ class CompanySettings(Base):
     id = Column(String(50), primary_key=True, default="singleton")
 
     company_name = Column(String(255), nullable=False, default="PT. Mixindo Abadi Karya")
-    address = Column(Text, nullable=True)
+    address = Column(String(1000), nullable=True)
     whatsapp = Column(String(50), nullable=True)
     email = Column(String(255), nullable=True)
     website = Column(String(255), nullable=True)
