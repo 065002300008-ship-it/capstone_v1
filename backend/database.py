@@ -1,11 +1,15 @@
 import os
 
-from dotenv import load_dotenv
+try:
+    from dotenv import load_dotenv
+except Exception:  # pragma: no cover
+    load_dotenv = None
 from sqlalchemy import create_engine
 from sqlalchemy.orm import declarative_base, sessionmaker
 
 # Load .env for local development only (Railway/Vercel should use real env vars).
-load_dotenv()
+if load_dotenv is not None:
+    load_dotenv()
 
 # Railway MySQL may provide `mysql://...`; SQLAlchemy wants `mysql+pymysql://...`.
 raw_database_url = os.getenv("DATABASE_URL") or "mysql+pymysql://root@localhost/mixindo_db"
