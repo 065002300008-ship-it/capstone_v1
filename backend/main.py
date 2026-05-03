@@ -47,7 +47,9 @@ class MaterialTest(Base):
     material_name = Column(String(255), nullable=False, index=True)
     # Match the test numbering style within a material: 1, 2, 3, ...
     test_no = Column(Integer, nullable=True)
-    test_name = Column(String(500), nullable=False)
+    # Keep this as VARCHAR (not TEXT) so MySQL can enforce UNIQUE constraints.
+    # 255 is also safe for older MySQL index-length limits.
+    test_name = Column(String(255), nullable=False)
 
     created_at = Column(DateTime, default=datetime.utcnow)
 
