@@ -255,6 +255,10 @@ def _get_company_settings(db: Session) -> CompanySettings:
         return row
     row = CompanySettings(id="singleton")
     db.add(row)
+    # Ensure the row exists in the DB/session before returning so callers can safely
+    # access attributes like `logo_data` and also so concurrent requests don't create duplicates.
+    db.flush()
+    return row
 
 # ================= AUTH HELPERS =================
 def _hash_password(password: str, salt_hex: str) -> str:
