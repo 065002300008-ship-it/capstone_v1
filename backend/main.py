@@ -1,7 +1,7 @@
 from fastapi import FastAPI, Depends, HTTPException, UploadFile, File, Form, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
-from sqlalchemy import create_engine, Column, String, Integer, Date, DateTime, Text, ForeignKey, UniqueConstraint, text, LargeBinary
-from sqlalchemy.orm import sessionmaker, declarative_base, Session
+from sqlalchemy import Column, String, Integer, Date, DateTime, Text, ForeignKey, UniqueConstraint, text, LargeBinary
+from sqlalchemy.orm import Session
 try:
     from sqlalchemy.dialects.mysql import LONGBLOB as MYSQL_LONGBLOB
 except Exception:  # pragma: no cover
@@ -11,9 +11,7 @@ from pydantic import BaseModel
 from fastapi.responses import StreamingResponse, Response
 from io import BytesIO
 from typing import Optional, List
-from database import engine
-from models import Base
-Base.metadata.create_all(bind=engine)
+from .database import Base, SessionLocal, engine
 import uuid
 import random
 import string
@@ -21,13 +19,7 @@ import traceback
 import os
 import hashlib
 import secrets
-
-# ================= DATABASE =================
-DATABASE_URL = os.getenv("DATABASE_URL", "mysql+pymysql://root:@127.0.0.1:3306/mixindo_db")
-
-engine = create_engine(DATABASE_URL, echo=os.getenv("SQLALCHEMY_ECHO", "1") == "1")
-SessionLocal = sessionmaker(bind=engine)
-Base = declarative_base()
+import time
 
 # Use LONGBLOB on MySQL to avoid 64KB BLOB truncation for PDFs/images.
 _DB_KIND = engine.dialect.name
@@ -214,7 +206,8 @@ class CompanySettings(Base):
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
 
-Base.metadata.create_all(bind=engine)
+# Table creation is done on startup to avoid crashing during import when the DB is not ready yet
+# (common during Railway deploy restarts).
 
 # ================= AUDIT HELPERS =================
 def _actor_username(request: Request) -> Optional[str]:
@@ -293,6 +286,21 @@ def _notify(db: Session, *, category: str, title: str, body: Optional[str] = Non
 
 # ================= APP =================
 app = FastAPI()
+
+@app.on_event("startup")
+def _startup_create_tables() -> None:
+    # Attempt to create tables with a short retry loop, so cold starts don't flake
+    # if the MySQL service is still warming up.
+    last_error: Optional[Exception] = None
+    for _ in range(int(os.getenv("DB_INIT_RETRIES", "20"))):
+        try:
+            Base.metadata.create_all(bind=engine)
+            return
+        except Exception as exc:  # pragma: no cover
+            last_error = exc
+            time.sleep(float(os.getenv("DB_INIT_RETRY_DELAY", "1.0")))
+    if last_error is not None:
+        raise last_error
 
 app.add_middleware(
     CORSMiddleware,
